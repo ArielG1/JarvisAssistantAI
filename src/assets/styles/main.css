@@ -1,0 +1,22 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-jarvis-bg text-jarvis-text font-mono antialiased;
+    overflow: hidden;
+  }
+  
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    @apply bg-jarvis-bg;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    @apply bg-jarvis-border rounded;
+  }
+}

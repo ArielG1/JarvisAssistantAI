@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+target/
+
+# Sensitive config files (secrets, tokens, keys)
+jarvis.config.toml
+searxng-settings.yml
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Archives
+*.rar
+*.zip
+*.tar.gz
+*.7z
+
+# Logs
+*.log
+logs/
+
+# Tauri gen
+src-tauri/gen/
+jarvis-shell/src-tauri/gen/
+
+# Cargo
+src-tauri/target/
+jarvis-shell/src-tauri/target/
+
+# Vite
+.vite/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# TypeScript
+*.tsbuildinfo
+
+# jarvis-shell (separate git repo)
+jarvis-shell/

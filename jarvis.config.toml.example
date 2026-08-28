@@ -1,0 +1,43 @@
+[app]
+log_level = "info"
+
+[boot]
+lazy_cerebro = true
+
+[cerebro]
+base_url = "http://localhost:8080"
+timeout_secs = 15
+binary_path = "/path/to/cerebro"
+idle_timeout_secs = 600
+
+[llm]
+binary_path = "/path/to/llama-server"
+model_path = "/path/to/model.gguf"
+port = 8081
+gpu_layers = 15
+context_size = 4096
+
+[ui]
+panels = ["sistema", "cerebro", "modulos"]
+
+[searxng]
+enabled = true
+port = 8888
+idle_timeout_secs = 300
+docker_image = "searxng/searxng"
+
+[web_search_fallback]
+enabled = true
+keywords = ["noticias", "últimas", "actual", "precio", "clima", "latest", "current", "today", "news", "qué hora es", "cuánto vale", "cuánto cuesta", "quién es", "qué es", "dónde está", "cuándo"]
+timeout_secs = 10
+max_results = 5
+
+[spotify]
+enabled = true
+client_id = "YOUR_SPOTIFY_CLIENT_ID"
+client_secret = "YOUR_SPOTIFY_CLIENT_SECRET"
+user_access_token = ""
+user_refresh_token = ""
+
+[youtube]
+enabled = true
