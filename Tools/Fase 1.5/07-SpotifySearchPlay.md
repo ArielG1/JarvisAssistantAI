@@ -76,9 +76,55 @@ del tema correcto.
 Comando "reproducir X en Spotify" funcionando, delegando la reproducción
 real a la app de escritorio ya instalada.
 
+## Funcionalidad de Cola (FIX 3)
+
+La funcionalidad de cola SÍ se implementó en FIXED.md FIX 3. Se agregó
+comando `add_to_spotify_queue` en spotify.rs y detección de intención
+"agregar a la fila" en chat.ts.
+
+### Comando Tauri
+
+```rust
+#[tauri::command]
+pub async fn add_to_spotify_queue(track_id: String, user_access_token: String) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("https://api.spotify.com/v1/me/player/queue?uri=spotify:track:{}", track_id))
+        .header("Authorization", format!("Bearer {}", user_access_token))
+        .send().await
+        .map_err(|e| e.to_string())?;
+
+    if resp.status().is_success() {
+        Ok("Canción agregada a la cola".into())
+    } else {
+        Err("Error al agregar a la cola".into())
+    }
+}
+```
+
+### Detección en chat
+
+Patrones soportados:
+- "agregá X a la fila"
+- "sumá X a la cola"
+- "poné X después de esta"
+- "agrega X a la fila"
+
+### Flujo
+
+1. Detectar intención de agregar a la cola
+2. Verificar que Spotify esté disponible
+3. Buscar track por nombre
+4. Invocar comando `add_to_spotify_queue`
+5. Mostrar resultado en chat
+
+### Requisito
+
+Se requiere OAuth de usuario (`user_access_token`) que se obtiene vía
+`authorize_spotify_user`. Ver FIXED.md FIX 3 para detalles completos.
+
 ## Nota para el futuro (fuera de esta fase)
 
-Controlar reproducción/cola/volumen sin abrir la app manualmente
-requeriría OAuth completo de usuario + Spotify Premium (Web Playback SDK
-o Connect API) — bastante más trabajo, se deja fuera del alcance de la
-Fase 1.5.
+Controlar volumen y otras funciones avanzadas de reproducción sin abrir
+la app manualmente requiere OAuth completo de usuario + Spotify Premium
+(Web Playback SDK o Connect API).

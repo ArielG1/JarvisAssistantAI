@@ -1,6 +1,5 @@
 pub(crate) mod commands;
 mod cerebro;
-pub mod lazy_service;
 
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -10,7 +9,6 @@ use tauri::Manager;
 use crate::commands::lazy_process;
 use crate::commands::searxng;
 use crate::commands::spotify;
-use lazy_service::LazyServiceRegistry;
 
 pub fn run() {
     let _guard = commands::errors::init_logging();
@@ -60,17 +58,17 @@ pub fn run() {
             let registry = Arc::new(Mutex::new(registry));
             app.manage(registry);
 
-            // Manage LazyServiceRegistry via tauri::State
-            // TODO: Wire LazyServiceRegistry into tauri command handlers
-            // (e.g. list_services, start_service) so it's actually used.
-            let service_registry = Arc::new(Mutex::new(LazyServiceRegistry::new()));
-            app.manage(service_registry);
-
-            // Init SearXNG manager
+            // Init SearXNG manager and start the container immediately at
+            // boot (it stays running for the whole app session — see
+            // FIX 1 in FIXED.md for why it is no longer lazy).
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Err(e) = searxng::init_searxng(app_handle).await {
+                if let Err(e) = searxng::init_searxng(app_handle.clone()).await {
                     warn!(?e, "SearXNG init skipped");
+                    return;
+                }
+                if let Err(e) = searxng::ensure_running(&app_handle).await {
+                    warn!(?e, "SearXNG failed to start at boot, will retry on first search");
                 }
             });
 
@@ -89,6 +87,7 @@ pub fn run() {
             commands::config::load_config,
             commands::config::save_config,
             commands::config::get_config_value,
+            commands::config::get_llm_model,
             lazy_process::lazy_start,
             lazy_process::lazy_stop,
             lazy_process::lazy_is_running,
@@ -106,6 +105,7 @@ pub fn run() {
             spotify::is_spotify_available,
             spotify::search_spotify,
             spotify::play_spotify,
+            spotify::add_to_spotify_queue,
             spotify::authorize_spotify_user,
         ])
         .run(tauri::generate_context!())

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const CONFIG_FILENAME: &str = "jarvis.config.toml";
 const ENV_CONFIG_PATH: &str = "JARVIS_CONFIG_PATH";
@@ -42,6 +42,10 @@ fn default_cerebro_binary_path() -> String {
 }
 fn default_cerebro_idle_timeout_secs() -> u64 {
     600
+}
+
+fn default_searxng_base_url() -> String {
+    "http://localhost:8888".to_string()
 }
 
 fn default_gpu_layers() -> u32 {
@@ -101,7 +105,10 @@ impl Default for BootConfig {
 pub struct SearxngConfig {
     pub enabled: bool,
     pub port: u16,
-    pub idle_timeout_secs: u64,
+    #[serde(default = "default_searxng_base_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
     pub docker_image: String,
 }
 
@@ -110,10 +117,43 @@ impl Default for SearxngConfig {
         Self {
             enabled: true,
             port: 8888,
-            idle_timeout_secs: 300,
+            base_url: "http://localhost:8888".to_string(),
+            idle_timeout_secs: None,
             docker_image: "searxng/searxng".to_string(),
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct WebSearchTriggerConfig {
+    #[serde(default = "default_trigger_words")]
+    pub trigger_words: Vec<String>,
+}
+
+impl Default for WebSearchTriggerConfig {
+    fn default() -> Self {
+        Self {
+            trigger_words: default_trigger_words(),
+        }
+    }
+}
+
+fn default_trigger_words() -> Vec<String> {
+    vec![
+        "hoy".into(), "ahora".into(), "último".into(), "última".into(),
+        "actualidad".into(), "2024".into(), "2025".into(), "2026".into(),
+        "buscá".into(), "googleá".into(), "busca".into(), "buscar".into(),
+        "buscar en".into(), "internet".into(),
+        "noticias".into(), "clima".into(), "tiempo".into(), "deportes".into(),
+        "fútbol".into(), "partido".into(),
+        "precio".into(), "cotización".into(), "dólar".into(), "euro".into(),
+        "bitcoin".into(),
+        "recetas".into(), "cocina".into(), "restaurantes".into(),
+        "mapa".into(), "ubicación".into(),
+        "peliculas".into(), "series".into(), "canciones".into(), "música".into(),
+        "horario".into(), "feriados".into(), "vuelos".into(), "hoteles".into(),
+        "opinión".into(), "reseña".into(), "review".into(),
+    ]
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -197,6 +237,8 @@ pub struct JarvisConfig {
     #[serde(default)]
     pub searxng: SearxngConfig,
     #[serde(default)]
+    pub web_search_trigger: WebSearchTriggerConfig,
+    #[serde(default)]
     pub web_search_fallback: WebSearchFallbackConfig,
     #[serde(default)]
     pub spotify: SpotifyConfig,
@@ -212,6 +254,7 @@ impl Default for JarvisConfig {
             ui: UiConfig::default(),
             boot: BootConfig::default(),
             searxng: SearxngConfig::default(),
+            web_search_trigger: WebSearchTriggerConfig::default(),
             web_search_fallback: WebSearchFallbackConfig::default(),
             spotify: SpotifyConfig::default(),
             youtube: YoutubeConfig::default(),
@@ -321,10 +364,17 @@ pub async fn save_config(config: JarvisConfig) -> Result<(), String> {
     Ok(())
 }
 
+const SENSITIVE_KEYS: &[&str] = &["client_secret", "user_access_token", "user_refresh_token", "secret"];
+
 #[tauri::command]
 pub async fn get_config_value(key: String) -> Result<String, String> {
-    let config = load_config().await?;
     let parts: Vec<&str> = key.split('.').collect();
+    if let Some(field) = parts.last() {
+        if SENSITIVE_KEYS.contains(field) {
+            return Ok("[REDACTED]".to_string());
+        }
+    }
+    let config = load_config().await?;
     match parts.as_slice() {
         ["cerebro", "base_url"] => Ok(config.cerebro.base_url),
         ["cerebro", "timeout_secs"] => Ok(config.cerebro.timeout_secs.to_string()),
@@ -342,7 +392,10 @@ pub async fn get_config_value(key: String) -> Result<String, String> {
         ["boot", "lazy_cerebro"] => Ok(config.boot.lazy_cerebro.to_string()),
         ["searxng", "enabled"] => Ok(config.searxng.enabled.to_string()),
         ["searxng", "port"] => Ok(config.searxng.port.to_string()),
-        ["searxng", "idle_timeout_secs"] => Ok(config.searxng.idle_timeout_secs.to_string()),
+        ["searxng", "base_url"] => Ok(config.searxng.base_url),
+        ["searxng", "idle_timeout_secs"] => Ok(
+            config.searxng.idle_timeout_secs.map_or_else(String::new, |v| v.to_string()),
+        ),
         ["searxng", "docker_image"] => Ok(config.searxng.docker_image),
         ["web_search_fallback", "enabled"] => Ok(config.web_search_fallback.enabled.to_string()),
         ["web_search_fallback", "timeout_secs"] => Ok(config.web_search_fallback.timeout_secs.to_string()),
@@ -359,4 +412,42 @@ pub async fn get_config_value(key: String) -> Result<String, String> {
         ["youtube", "enabled"] => Ok(config.youtube.enabled.to_string()),
         _ => Err(format!("Unknown config key: {}", key)),
     }
+}
+
+#[derive(Deserialize)]
+struct ModelId {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct ModelsResponse {
+    data: Vec<ModelId>,
+}
+
+#[tauri::command]
+pub async fn get_llm_model() -> Result<String, String> {
+    let config = load_config().await?;
+    let port = config.llm.port;
+    let url = format!("http://localhost:{}/v1/models", port);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    if let Ok(resp) = client.get(&url).send().await {
+        if let Ok(models) = resp.json::<ModelsResponse>().await {
+            if let Some(first) = models.data.first() {
+                return Ok(first.id.clone());
+            }
+        }
+    }
+
+    // Fallback: extract filename stem from model_path
+    let path = Path::new(&config.llm.model_path);
+    if let Some(stem) = path.file_stem() {
+        return Ok(stem.to_string_lossy().to_string());
+    }
+
+    Ok("unknown".to_string())
 }

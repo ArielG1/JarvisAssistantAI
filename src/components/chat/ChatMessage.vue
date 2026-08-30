@@ -30,6 +30,22 @@ defineProps<{
       ]"
     >
       <p class="whitespace-pre-wrap break-words">{{ message.content }}</p>
+      <div
+        v-if="message.role === 'jarvis' && message.source?.type === 'web' && message.source.domain"
+        class="mt-1.5 pt-1.5 border-t border-jarvis-border/30"
+      >
+        <span class="text-[10px] text-jarvis-muted">
+          Fuente:
+          <a
+            v-if="message.source.url"
+            :href="message.source.url"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="underline hover:text-jarvis-cyan transition-colors"
+          >{{ message.source.domain }}</a>
+          <span v-else>{{ message.source.domain }}</span>
+        </span>
+      </div>
       <span class="block mt-1 text-[10px]" :class="message.role === 'system' ? 'text-amber-500/60' : 'text-jarvis-muted'">
         {{ message.timestamp.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }) }}
       </span>

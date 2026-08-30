@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use reqwest::Client;
@@ -8,7 +10,8 @@ use tauri::{AppHandle, Manager};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
-use crate::commands::config::{load_config_sync, SearxngConfig, WebSearchFallbackConfig};
+use crate::cerebro::get_client;
+use crate::commands::config::{load_config_sync, SearxngConfig, WebSearchFallbackConfig, WebSearchTriggerConfig};
 use crate::commands::lazy_process::{LazyProcessConfig, LazyProcessHandle};
 
 const CONTAINER_NAME: &str = "jarvis-searxng";
@@ -76,7 +79,7 @@ pub struct SearxngManager {
 
 impl SearxngManager {
     pub fn new(config: SearxngConfig) -> Self {
-        let hc_url = format!("http://localhost:{}/", config.port);
+        let hc_url = format!("{}/", config.base_url);
         let settings_path = resolve_settings_path();
 
         let mut docker_args: Vec<String> = vec![
@@ -90,28 +93,49 @@ impl SearxngManager {
         ];
 
         // Mount custom settings.yml if it exists
-        if settings_path.exists() {
-            let settings_str = settings_path.to_string_lossy().to_string();
+        let settings_str = settings_path.to_string_lossy().to_string();
+        let resolved = settings_path.canonicalize().unwrap_or_else(|_| settings_path.to_path_buf());
+        let mut allowed_root = false;
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                if let Ok(exe_canon) = exe_dir.canonicalize() {
+                    if resolved.starts_with(&exe_canon) {
+                        allowed_root = true;
+                    }
+                }
+            }
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Ok(cwd_canon) = cwd.canonicalize() {
+                if resolved.starts_with(&cwd_canon) {
+                    allowed_root = true;
+                }
+            }
+        }
+        if allowed_root && settings_path.exists() {
             docker_args.push("-v".to_string());
             docker_args.push(format!("{}:/etc/searxng/settings.yml", settings_str));
             info!(path = %settings_str, "mounting SearXNG settings");
-        } else {
+        } else if !settings_path.exists() {
             warn!("searxng-settings.yml not found, using default SearXNG config (JSON API may be disabled)");
+        } else {
+            warn!(path = %settings_str, "settings_path outside allowed directories, refusing to mount");
         }
 
         let img = &config.docker_image;
-        if !img.chars().all(|c| c.is_alphanumeric() || "-_./:".contains(c)) {
-            warn!(image = %img, "invalid docker image name, falling back to default");
-            docker_args.push("searxng/searxng:latest".to_string());
-        } else {
+        let allowed_images = ["searxng/searxng:latest", "searxng/searxng"];
+        if allowed_images.contains(&img.as_str()) {
             docker_args.push(img.clone());
+        } else {
+            warn!(image = %img, "docker image not in allowlist, falling back to default");
+            docker_args.push("searxng/searxng:latest".to_string());
         }
 
         let lazy_config = LazyProcessConfig {
             name: CONTAINER_NAME.to_string(),
             command: Some("docker".to_string()),
             args: docker_args,
-            idle_timeout_secs: config.idle_timeout_secs,
+            idle_timeout_secs: config.idle_timeout_secs.unwrap_or(u64::MAX),
             healthcheck_url: Some(hc_url),
             healthcheck_interval_secs: Some(3),
         };
@@ -122,7 +146,7 @@ impl SearxngManager {
     }
 
     fn base_url(&self) -> String {
-        format!("http://localhost:{}", self.config.port)
+        self.config.base_url.clone()
     }
 }
 
@@ -185,17 +209,14 @@ async fn cleanup_existing_container() -> Result<(), String> {
 }
 
 async fn wait_for_health(
-    port: u16,
+    base_url: &str,
     timeout_secs: u64,
 ) -> Result<(), String> {
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
-
-    let url = format!("http://localhost:{}/", port);
+    let client = get_client()?;
+    let url = format!("{}/", base_url);
     let start = tokio::time::Instant::now();
-    let deadline = std::time::Duration::from_secs(timeout_secs);
+    let deadline = Duration::from_secs(timeout_secs);
+    let mut backoff = Duration::from_secs(2);
 
     loop {
         if start.elapsed() >= deadline {
@@ -204,9 +225,9 @@ async fn wait_for_health(
                 timeout_secs
             ));
         }
-        match client.get(&url).send().await {
+        match client.get(&url).timeout(REQUEST_TIMEOUT).send().await {
             Ok(resp) if resp.status().is_success() => {
-                info!("SearXNG is healthy on port {}", port);
+                info!("SearXNG is healthy at {}", base_url);
                 return Ok(());
             }
             Ok(resp) => {
@@ -216,7 +237,21 @@ async fn wait_for_health(
                 warn!("SearXNG healthcheck attempt failed: {}", e);
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let jitter = Duration::from_millis((nanos % 500) as u64);
+        let sleep_duration = backoff + jitter;
+        let remaining = deadline.saturating_sub(start.elapsed());
+        if sleep_duration >= remaining {
+            return Err(format!(
+                "SearXNG healthcheck timed out after {}s",
+                timeout_secs
+            ));
+        }
+        tokio::time::sleep(sleep_duration).await;
+        backoff = Duration::from_secs((backoff.as_secs() * 2).min(30));
     }
 }
 
@@ -233,35 +268,34 @@ async fn is_container_running() -> Result<bool, String> {
     Ok(stdout.trim() == "true")
 }
 
-async fn ensure_running(app: &AppHandle) -> Result<(), String> {
+pub async fn ensure_running(app: &AppHandle) -> Result<(), String> {
     let mgr_arc = get_manager(app)?;
     let mgr = mgr_arc.lock().await;
-    let port = mgr.config.port;
-    drop(mgr);
+    let base_url = mgr.config.base_url.clone();
 
     ensure_docker_available().await?;
 
-    if let Ok(running) = is_container_running().await {
-        if running {
-            match wait_for_health(port, 5).await {
-                Ok(()) => {
-                    info!("SearXNG container already running and healthy");
-                    return Ok(());
-                }
-                Err(_) => {
-                    warn!("SearXNG container running but unhealthy, restarting...");
-                    cleanup_existing_container().await?;
-                }
+    let container_confirmed_running = is_container_running().await.unwrap_or(false);
+
+    if container_confirmed_running {
+        match wait_for_health(&base_url, 5).await {
+            Ok(()) => {
+                info!("SearXNG container already running and healthy");
+                return Ok(());
+            }
+            Err(_) => {
+                warn!("SearXNG container running but unhealthy, restarting...");
             }
         }
     }
 
+    cleanup_existing_container().await?;
+    mgr.handle.reset().await;
     info!("starting SearXNG Docker container");
-    let mgr = mgr_arc.lock().await;
     mgr.handle.start().await?;
     drop(mgr);
 
-    wait_for_health(port, 30).await
+    wait_for_health(&base_url, 30).await
 }
 
 // --- Tauri Commands ---
@@ -270,6 +304,7 @@ async fn ensure_running(app: &AppHandle) -> Result<(), String> {
 pub async fn start_searxng(app: AppHandle) -> Result<String, String> {
     let mgr_arc = get_manager(&app)?;
     let mgr = mgr_arc.lock().await;
+    let base_url = mgr.config.base_url.clone();
     let port = mgr.config.port;
     drop(mgr);
 
@@ -277,7 +312,7 @@ pub async fn start_searxng(app: AppHandle) -> Result<String, String> {
 
     if let Ok(running) = is_container_running().await {
         if running {
-            match wait_for_health(port, 5).await {
+            match wait_for_health(&base_url, 5).await {
                 Ok(()) => {
                     info!("SearXNG container already running and healthy");
                     return Ok(format!("SearXNG already running on port {}", port));
@@ -294,7 +329,7 @@ pub async fn start_searxng(app: AppHandle) -> Result<String, String> {
     mgr.handle.start().await?;
     drop(mgr);
 
-    wait_for_health(port, 30).await?;
+    wait_for_health(&base_url, 30).await?;
 
     Ok(format!("SearXNG running on port {}", port))
 }
@@ -352,15 +387,12 @@ pub async fn search_web(app: AppHandle, query: String) -> Result<Vec<SearchResul
     let base_url = mgr.base_url();
     drop(mgr);
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
-
+    let client = get_client()?;
     let url = format!("{}/search?q={}&format=json", base_url, urlencoding::encode(&query));
 
     let resp = client
         .get(&url)
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Search request failed: {}", e))?;
@@ -390,12 +422,107 @@ pub async fn search_web(app: AppHandle, query: String) -> Result<Vec<SearchResul
     Ok(results)
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SearxResult {
+    pub title: String,
+    pub url: String,
+    pub content: Option<String>,
+}
+
+pub async fn search_web_generic(
+    query: &str,
+    category: &str,
+    base_url: &str,
+) -> Result<Vec<SearxResult>, String> {
+    let client = get_client()?;
+
+    let url = format!(
+        "{}/search?q={}&format=json&categories={}",
+        base_url,
+        urlencoding::encode(query),
+        urlencoding::encode(category),
+    );
+
+    let resp = client
+        .get(&url)
+        .timeout(REQUEST_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| format!("Search request failed: {}", e))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("SearXNG returned {}: {}", status, body));
+    }
+
+    let api_resp: SearxngApiResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse search response: {}", e))?;
+
+    let results: Vec<SearxResult> = api_resp
+        .results
+        .into_iter()
+        .map(|r| SearxResult {
+            title: r.title,
+            url: r.url,
+            content: Some(r.content),
+        })
+        .collect();
+
+    Ok(results)
+}
+
 pub fn should_trigger_web_search(query: &str, config: &WebSearchFallbackConfig) -> bool {
     if !config.enabled {
         return false;
     }
     let query_lower = query.to_lowercase();
     config.keywords.iter().any(|kw| query_lower.contains(&kw.to_lowercase()))
+}
+
+static TRIGGER_CONFIG: Lazy<WebSearchTriggerConfig> = Lazy::new(|| {
+    load_config_sync()
+        .map(|c| c.web_search_trigger)
+        .unwrap_or_default()
+});
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const YOUTUBE_CACHE_TTL: Duration = Duration::from_secs(300);
+
+struct CacheEntry {
+    results: Vec<VideoResult>,
+    cached_at: std::time::Instant,
+}
+
+static YOUTUBE_CACHE: Lazy<Mutex<HashMap<String, CacheEntry>>> = Lazy::new(|| {
+    Mutex::new(HashMap::new())
+});
+
+pub fn should_search(query: &str) -> bool {
+    let query_lower = query.to_lowercase();
+    TRIGGER_CONFIG
+        .trigger_words
+        .iter()
+        .any(|w| query_lower.contains(&w.to_lowercase()))
+}
+
+/// Queries matching these topics almost never have an answer in Cerebro
+/// (weather, current time, exchange rates, live scores), so it is not
+/// worth trying Cerebro first — go straight to the web.
+const DIRECT_WEB_PATTERNS: &[&str] = &[
+    "clima", "tiempo atmosférico", "temperatura", "pronóstico", "pronostico",
+    "lluvia", "lluvias",
+    "qué hora es", "que hora es", "hora actual",
+    "cotización", "cotizacion", "dólar", "dolar", "precio del dólar",
+    "precio del dolar", "euro", "bitcoin", "pesos", "cambio",
+    "marcador", "resultado", "resultado de", "marcador de", "gol", "goles",
+];
+
+pub fn should_bypass_cerebro(query: &str) -> bool {
+    let query_lower = query.to_lowercase();
+    DIRECT_WEB_PATTERNS.iter().any(|p| query_lower.contains(p))
 }
 
 // --- YouTube Search ---
@@ -429,11 +556,7 @@ pub async fn search_youtube(app: AppHandle, query: String) -> Result<Vec<VideoRe
     let base_url = mgr.base_url();
     drop(mgr);
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
-
+    let client = get_client()?;
     let url = format!(
         "{}/search?q={}&format=json&categories=videos",
         base_url,
@@ -442,6 +565,7 @@ pub async fn search_youtube(app: AppHandle, query: String) -> Result<Vec<VideoRe
 
     let resp = client
         .get(&url)
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("YouTube search request failed: {}", e))?;
@@ -473,12 +597,52 @@ pub async fn search_youtube(app: AppHandle, query: String) -> Result<Vec<VideoRe
 
 #[tauri::command]
 pub async fn play_youtube(app: AppHandle, query: String) -> Result<String, String> {
-    let results = search_youtube(app, query.clone()).await?;
+    let cache_key = query.to_lowercase();
+    let results = {
+        let cache = YOUTUBE_CACHE.lock().await;
+        if let Some(entry) = cache.get(&cache_key) {
+            if entry.cached_at.elapsed() < YOUTUBE_CACHE_TTL {
+                entry.results.clone()
+            } else {
+                drop(cache);
+                let r = search_youtube(app, query.clone()).await?;
+                let mut cache = YOUTUBE_CACHE.lock().await;
+                cache.insert(cache_key.clone(), CacheEntry {
+                    results: r.clone(),
+                    cached_at: std::time::Instant::now(),
+                });
+                r
+            }
+        } else {
+            drop(cache);
+            let r = search_youtube(app, query.clone()).await?;
+            let mut cache = YOUTUBE_CACHE.lock().await;
+            cache.insert(cache_key.clone(), CacheEntry {
+                results: r.clone(),
+                cached_at: std::time::Instant::now(),
+            });
+            r
+        }
+    };
 
     let video = results
         .into_iter()
         .next()
         .ok_or_else(|| format!("No se encontraron videos para: {}", query))?;
+
+    let allowed_domains = ["youtube.com", "www.youtube.com", "youtu.be"];
+    let url_host = url::Url::parse(&video.url)
+        .map_err(|e| format!("URL inválida del resultado: {}", e))?
+        .host_str()
+        .unwrap_or("")
+        .to_string();
+    let is_allowed = allowed_domains.iter().any(|&d| url_host == d || url_host.ends_with(&format!(".{}", d)));
+    if !is_allowed {
+        return Err(format!(
+            "URL rechazada: dominio no permitido '{}'. Solo se permiten URLs de YouTube.",
+            url_host
+        ));
+    }
 
     open::that(&video.url)
         .map_err(|e| format!("No se pudo abrir el navegador: {}", e))?;
@@ -512,15 +676,13 @@ pub async fn search_web_for_context(
     let base_url = mgr.base_url();
     drop(mgr);
 
-    let client = Client::builder()
-        .timeout(std::time::Duration::from_secs(timeout))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let client = get_client()?;
 
     let url = format!("{}/search?q={}&format=json", base_url, urlencoding::encode(query));
 
     let resp = client
         .get(&url)
+        .timeout(REQUEST_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Search request failed: {}", e))?;

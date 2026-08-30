@@ -34,7 +34,7 @@ export const PANEL_CONFIG: PanelConfig[] = [
     icon: "🧠",
     metrics: [
       { key: "status", label: "Estado", value: "Conectado" },
-      { key: "model", label: "Modelo", value: "llama3" },
+      { key: "model", label: "Modelo", value: "..." },
       { key: "latency", label: "Latencia", value: "45ms" },
     ],
   },

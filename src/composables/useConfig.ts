@@ -26,7 +26,7 @@ export function getCerebroUrl(): string {
 
 export function getOllamaModel(): string {
   const store = useConfigStore();
-  return store.config.ollama.model;
+  return store.config.llm.model_path;
 }
 
 export function getActivePanels(): string[] {

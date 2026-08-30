@@ -117,14 +117,6 @@ async fn refresh_user_token(refresh_token: &str) -> Result<(String, String), Str
     Ok((new_access, new_refresh))
 }
 
-async fn get_user_access_token() -> Result<String, String> {
-    let config = load_config_sync().map_err(|e| e.to_string())?;
-    if config.spotify.user_access_token.is_empty() {
-        return Err("Spotify user not authorized. Run `authorize_spotify_user` first.".into());
-    }
-    Ok(config.spotify.user_access_token)
-}
-
 async fn get_access_token() -> Result<String, String> {
     let mut cache = TOKEN_CACHE.lock().await;
     if cache.is_valid() {
@@ -419,4 +411,58 @@ pub async fn play_spotify(query: String) -> Result<String, String> {
         "Reproduciendo: {} - {} en Spotify",
         top.name, top.artist
     ))
+}
+
+#[tauri::command]
+pub async fn add_to_spotify_queue(query: String) -> Result<String, String> {
+    let results = search_spotify(query).await?;
+    let top = &results[0];
+    let track_id = top.uri.strip_prefix("spotify:track:").unwrap_or(&top.uri);
+    let track_uri = format!("spotify:track:{}", track_id);
+
+    let config = load_config_sync().map_err(|e| e.to_string())?;
+    if config.spotify.user_access_token.is_empty() {
+        return Err(
+            "Spotify no está autorizado para controlar la reproducción. Ejecutá primero la autorización de usuario."
+                .into(),
+        );
+    }
+
+    let client = Client::new();
+    let resp = client
+        .post("https://api.spotify.com/v1/me/player/queue")
+        .header("Authorization", format!("Bearer {}", config.spotify.user_access_token))
+        .query(&[("uri", track_uri.as_str())])
+        .send()
+        .await;
+
+    match resp {
+        Ok(r) if r.status().is_success() || r.status().as_u16() == 204 => {
+            return Ok(format!("{} - {}", top.name, top.artist));
+        }
+        Ok(r) if r.status().as_u16() == 401 => {
+            if !config.spotify.user_refresh_token.is_empty() {
+                if let Ok((new_access, _)) = refresh_user_token(&config.spotify.user_refresh_token).await {
+                    let client = Client::new();
+                    let retry = client
+                        .post("https://api.spotify.com/v1/me/player/queue")
+                        .header("Authorization", format!("Bearer {}", new_access))
+                        .query(&[("uri", track_uri.as_str())])
+                        .send()
+                        .await;
+                    if let Ok(r) = retry {
+                        if r.status().is_success() || r.status().as_u16() == 204 {
+                            return Ok(format!("{} - {}", top.name, top.artist));
+                        }
+                    }
+                }
+            }
+            Err("No se pudo autenticar con Spotify (token expirado). Reintentá la autorización.".into())
+        }
+        Ok(r) => Err(format!(
+            "Spotify respondió con error {} al agregar a la cola (¿hay algo reproduciéndose ya?)",
+            r.status()
+        )),
+        Err(e) => Err(format!("No se pudo agregar a la cola: {}", e)),
+    }
 }

@@ -126,10 +126,7 @@ pub async fn ask_cerebro(
 
 pub async fn ask_llm(query: &str, history: Option<Vec<(String, String)>>) -> Result<String, String> {
     let cfg = load_config().await.unwrap_or_default();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = get_client()?;
 
     let mut messages: Vec<serde_json::Value> = Vec::new();
     if let Some(hist) = &history {
@@ -154,6 +151,11 @@ pub async fn ask_llm(query: &str, history: Option<Vec<(String, String)>>) -> Res
         .send()
         .await
         .map_err(|e| format!("llama-server no responde: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP error from llama-server: {}", resp.status()));
+    }
+
     let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     body["choices"][0]["message"]["content"]
         .as_str()
@@ -166,6 +168,15 @@ pub struct CerebroFallbackResponse {
     pub response: String,
     pub web_search_used: bool,
     pub search_results: Vec<SearchResult>,
+    pub source: String,
+    pub source_url: Option<String>,
+    pub source_domain: Option<String>,
+}
+
+fn extract_domain(url_str: &str) -> Option<String> {
+    url::Url::parse(url_str)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
 }
 
 pub async fn ask_cerebro_with_fallback(
@@ -181,6 +192,39 @@ pub async fn ask_cerebro_with_fallback(
 
     let fallback_cfg = &config.web_search_fallback;
 
+    // Direct bypass: skip Cerebro entirely for topics it will basically
+    // never have an answer for (weather, time, exchange rates, scores).
+    if searxng::should_bypass_cerebro(&query) {
+        info!("direct web bypass for query: {}", &query[..query.len().min(80)]);
+        if let Ok((context, results)) = searxng::search_web_for_context(app, &query, fallback_cfg).await {
+            if !context.is_empty() {
+                let enhanced_query = format!(
+                    "{}\n\nUsa la siguiente información de la web para responder:\n{}",
+                    query, context
+                );
+                match ask_llm(&enhanced_query, history.clone()).await {
+                    Ok(response) => {
+                        let source_url = results.first().map(|r| r.url.clone());
+                        let source_domain = source_url.as_deref().and_then(extract_domain);
+                        return Ok(CerebroFallbackResponse {
+                            response,
+                            web_search_used: true,
+                            search_results: results,
+                            source: "web".to_string(),
+                            source_url,
+                            source_domain,
+                        });
+                    }
+                    Err(e) => {
+                        warn!("LLM failed after direct web bypass ({}), continuing to normal flow", e);
+                    }
+                }
+            }
+        }
+        // If the bypass path failed for any reason, fall through to the
+        // normal flow below instead of giving up.
+    }
+
     // Nivel 1: Cerebro directo
     match ask_cerebro(app, query.clone(), Some(config.clone()), history.clone()).await {
         Ok(response) => {
@@ -188,6 +232,9 @@ pub async fn ask_cerebro_with_fallback(
                 response,
                 web_search_used: false,
                 search_results: vec![],
+                source: "cerebro".to_string(),
+                source_url: None,
+                source_domain: None,
             });
         }
         Err(e) => {
@@ -195,36 +242,31 @@ pub async fn ask_cerebro_with_fallback(
         }
     }
 
-    // Nivel 2: Web search + Cerebro
-    let needs_search = searxng::should_trigger_web_search(&query, fallback_cfg);
-    if needs_search {
-        info!("web search fallback triggered for query: {}", &query[..query.len().min(80)]);
-        let search_result = searxng::search_web_for_context(app, &query, fallback_cfg).await;
-
-        match search_result {
-            Ok((context, results)) if !context.is_empty() => {
+    // Nivel 2: Búsqueda web (si should_search)
+    if searxng::should_search(&query) {
+        if let Ok((context, results)) = searxng::search_web_for_context(app, &query, fallback_cfg).await {
+            if !context.is_empty() {
                 let enhanced_query = format!(
                     "{}\n\nUsa la siguiente información de la web para responder:\n{}",
                     query, context
                 );
-                match ask_cerebro(app, enhanced_query, Some(config.clone()), history.clone()).await {
+                match ask_llm(&enhanced_query, history.clone()).await {
                     Ok(response) => {
+                        let source_url = results.first().map(|r| r.url.clone());
+                        let source_domain = source_url.as_deref().and_then(extract_domain);
                         return Ok(CerebroFallbackResponse {
                             response,
                             web_search_used: true,
                             search_results: results,
+                            source: "web".to_string(),
+                            source_url,
+                            source_domain,
                         });
                     }
                     Err(e) => {
-                        warn!("Cerebro falló tras web search ({}), probando LLM local", e);
+                        warn!("LLM failed after web search ({}), continuing to direct LLM", e);
                     }
                 }
-            }
-            Ok(_) => {
-                info!("web search returned no results");
-            }
-            Err(e) => {
-                error!("web search failed: {}", e);
             }
         }
     }
@@ -236,6 +278,9 @@ pub async fn ask_cerebro_with_fallback(
             response,
             web_search_used: false,
             search_results: vec![],
+            source: "llm".to_string(),
+            source_url: None,
+            source_domain: None,
         }),
         Err(e) => {
             error!("Todos los fallbacks fallaron: LLM local error: {}", e);

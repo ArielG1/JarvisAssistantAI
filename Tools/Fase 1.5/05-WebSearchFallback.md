@@ -77,6 +77,57 @@ el dominio de la fuente principal), para que el usuario pueda verificar.
 - Pregunta conversacional trivial ("hola") → confirmar que NO dispara una
   búsqueda (revisar que SearXNG no se levanta para esto).
 
+## ⚠️ Optimización adicional (FIXED.md FIX 2)
+
+FIXED.md FIX 2 añade un **bypass directo a web search** para queries de
+clima/hora/dólar que modifica el mismo bloque de `cerebro.rs` que este
+archivo edita.
+
+### Cambios
+
+- Se agregó una función `should_bypass_cerebro()` en `searxng.rs`
+- Detecta queries de **clima**, **hora**, **cotización/dólar**, **marcadores**
+- Va directo a web search sin intentar Cerebro primero
+- Se ejecuta **ANTES** del `match ask_cerebro(...)` en `cerebro.rs`
+- Agrega el patrón de bypass en `cerebro.rs` antes de "Nivel 1: Cerebro directo"
+
+### Código del bypass
+
+```rust
+if searxng::should_bypass_cerebro(&query) {
+    info!("direct web bypass for query: {}", &query[..query.len().min(80)]);
+    if let Ok((context, results)) = searxng::search_web_for_context(app, &query, fallback_cfg).await {
+        if !context.is_empty() {
+            let enhanced_query = format!(
+                "{}\n\nUsa la siguiente información de la web para responder:\n{}",
+                query, context
+            );
+            match ask_llm(&enhanced_query, history.clone()).await {
+                Ok(response) => {
+                    return Ok(CerebroFallbackResponse {
+                        response,
+                        web_search_used: true,
+                        search_results: results,
+                    });
+                }
+                Err(e) => {
+                    warn!("LLM failed after direct web bypass ({}), continuing to normal flow", e);
+                }
+            }
+        }
+    }
+}
+```
+
+### Impacto sobre este documento
+
+Este bypass **no reemplaza** la lógica de fallback descrita arriba (T2),
+la **complementa**. Queries triviales/saludos pasan por Cerebro normalmente
+y después al modelo local. Queries de clima/hora/dólar/marcadores saltan
+directo a web search ahorrando el paso innecesario por Cerebro.
+
+---
+
 ## Entregable
 
 El chat ahora tiene 3 niveles de fallback: Cerebro → búsqueda web → modelo

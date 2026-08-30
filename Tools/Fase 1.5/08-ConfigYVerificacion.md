@@ -33,7 +33,7 @@ context_size = 4096
 
 [searxng]
 base_url = "http://localhost:8080"
-idle_timeout_secs = 300
+# idle_timeout_secs eliminado: SearXNG no tiene idle timeout (siempre activo, ver FIXED.md FIX 1)
 
 [spotify]
 client_id = "..."
@@ -62,8 +62,10 @@ cards = ["estado", "sistema", "cerebro", "modulos"]
 - [ ] "Poneme <canción> en Spotify" → abre/enfoca la app de Spotify
       reproduciendo el tema correcto.
 - [ ] Dejar la app abierta sin uso el tiempo suficiente → confirmar en el
-      administrador de tareas que Cerebro y SearXNG se apagaron solos,
-      liberando la RAM.
+      administrador de tareas que Cerebro se apagó por idle timeout
+      (SearXNG permanece activo, ver FIXED.md FIX 1).
+- [ ] Verificar que SearXNG está corriendo al inicio (`docker ps` muestra
+      `jarvis-searxng`).
 
 ## Entregable — cierre de Fase 1.5
 
@@ -71,3 +73,11 @@ JARVIS con boot liviano y confiable, tres niveles de fallback de
 información (Cerebro → web → modelo a ciegas), y dos capacidades de
 medios (YouTube, Spotify), todo con Cerebro y SearXNG corriendo
 únicamente cuando hacen falta.
+
+## Cambios respecto a FIXED.md
+
+| Cambio | Fuente | Descripción |
+|--------|--------|-------------|
+| `[searxng] idle_timeout_secs` eliminado | FIX 1 | SearXNG ya no tiene idle timeout; siempre está corriendo como servicio Docker persistente. |
+| Checklist "se apagaron solos" actualizado | FIX 1 | Solo Cerebro se apaga por idle timeout. SearXNG permanece activo. |
+| Checklist "SearXNG corriendo al inicio" agregado | FIX 1 | `docker ps` debe mostrar `jarvis-searxng` al iniciar el sistema. |

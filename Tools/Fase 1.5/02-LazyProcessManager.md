@@ -69,3 +69,29 @@ sin depender todavía de Docker ni del binario de Cerebro.
 
 Módulo `lazy_service` genérico, probado con un servicio de juguete, listo
 para que J1.5-03 y J1.5-04 lo usen con Cerebro y SearXNG respectivamente.
+
+---
+
+## ⚠️ Nota sobre estado actual (post-FIXED.md)
+
+> **Este diseño ya no refleja el código real del proyecto.**
+
+El módulo `lazy_service.rs` descrito anteriormente fue **eliminado** como
+código muerto en **FIX 4** de `FIXED.md`. El diseño propuesto
+(`LazyService` / `LazyServiceRegistry` con healthcheck HTTP, vigilante de
+inactividad, etc.) nunca llegó a integrarse o fue reemplazado.
+
+La implementación **real y activa** se encuentra en:
+
+```
+src-tauri/src/commands/lazy_process.rs
+```
+
+Con las estructuras principales:
+
+- **`LazyProcessManager`** — gestión de procesos perezosos (arranque bajo demanda, control de vida).
+- **`LazyProcessRegistry`** — registro/lookup de procesos lazy.
+
+Estas son las estructuras que el resto del códigobase importa y usa.
+
+Para más detalles, consultar **FIXED.md → FIX 4**.

@@ -57,8 +57,9 @@ pub async fn check_cerebro_health(config: Option<JarvisConfig>) -> Result<bool, 
 
 #[tauri::command]
 pub async fn send_to_cerebro(app: AppHandle, message: String) -> Result<String, String> {
-    match crate::cerebro::ask_cerebro(&app, message.clone(), None, None).await {
-        Ok(response) => Ok(response),
+    let result = crate::cerebro::ask_cerebro_with_fallback(&app, message.clone(), None, None).await;
+    match result {
+        Ok(fallback) => Ok(fallback.response),
         Err(e) => {
             error!(
                 message_len = message.len(),

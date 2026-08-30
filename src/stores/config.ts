@@ -4,8 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type { JarvisConfig } from "../types/config";
 
 const defaultConfig: JarvisConfig = {
-  cerebro: { base_url: "http://localhost:8080", timeout_secs: 15 },
-  ollama: { model: "llama3:8b", base_url: "http://localhost:11434" },
+  cerebro: { base_url: "http://localhost:8080", timeout_secs: 15, binary_path: "", idle_timeout_secs: 600 },
+  llm: { binary_path: "llama-server", model_path: "", port: 8081, gpu_layers: 0, context_size: 4096 },
   ui: { panels: ["chat"] },
 };
 

@@ -193,6 +193,17 @@ impl LazyProcessManager {
         }
         false
     }
+
+    /// Forces the manager to forget its tracked child process without
+    /// touching the real underlying service (e.g. a detached Docker
+    /// container). Use this before re-attempting `start()` when an
+    /// external check (like `docker inspect`) has confirmed the real
+    /// service is not running, but the manager's own state does not
+    /// reflect that yet.
+    pub fn reset(&mut self) {
+        self.process = None;
+        self.started = false;
+    }
 }
 
 #[derive(Clone)]
@@ -230,6 +241,12 @@ impl LazyProcessHandle {
     pub async fn touch(&self) {
         let mut mgr = self.inner.lock().await;
         mgr.touch();
+    }
+
+    /// See `LazyProcessManager::reset`.
+    pub async fn reset(&self) {
+        let mut mgr = self.inner.lock().await;
+        mgr.reset();
     }
 
     pub async fn get_status(&self) -> (bool, bool, Option<Duration>) {

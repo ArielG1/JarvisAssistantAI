@@ -1,14 +1,19 @@
 import { defineStore } from "pinia"
 import { ref } from "vue"
 import { invoke } from "@tauri-apps/api/core"
-import type { ChatMessage, MessageRole } from "@/types/message"
+import type { ChatMessage, MessageRole, MessageSource } from "@/types/message"
 import { createMessage } from "@/types/message"
 import { useHudStore } from "./hud"
+
+type ResponseSource = "cerebro" | "web" | "llm"
 
 interface CerebroFallbackResponse {
   response: string
   web_search_used: boolean
   search_results: Array<{ title: string; url: string; snippet: string }>
+  source: ResponseSource
+  source_url: string | null
+  source_domain: string | null
 }
 
 export const useChatStore = defineStore("chat", () => {
@@ -18,8 +23,8 @@ export const useChatStore = defineStore("chat", () => {
   const cerebroStarted = ref(false)
   const webSearchActive = ref(false)
 
-  function addMessage(content: string, role: MessageRole) {
-    messages.value.push(createMessage(content, role))
+  function addMessage(content: string, role: MessageRole, source?: MessageSource) {
+    messages.value.push(createMessage(content, role, source))
   }
 
   function clearMessages() {
@@ -31,6 +36,20 @@ export const useChatStore = defineStore("chat", () => {
     typingMessage.value = message ?? ""
   }
 
+  function setTypingSource(source: ResponseSource) {
+    switch (source) {
+      case "cerebro":
+        typingMessage.value = ""
+        break
+      case "web":
+        typingMessage.value = "Sin resultados en Cerebro — buscando en internet..."
+        break
+      case "llm":
+        typingMessage.value = "Sin resultados de ningún lado — usando modelo local..."
+        break
+    }
+  }
+
   async function ensureCerebroRunning() {
     if (cerebroStarted.value) return
     try {
@@ -39,8 +58,26 @@ export const useChatStore = defineStore("chat", () => {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       console.warn("[chat] start_cerebro failed (may already be running):", msg)
-      cerebroStarted.value = true
+      throw new Error(`Cerebro startup failed: ${msg}`)
     }
+  }
+
+  // NOTE: These patterns duplicate DIRECT_WEB_PATTERNS and trigger_words from
+  // jarvis.config.toml. When modifying trigger words, sync both locations.
+  function shouldShowWebNotification(query: string): boolean {
+    const lower = query.toLowerCase()
+    const bypassPatterns = ["dólar", "dolar", "clima", "tiempo", "hora", "marcador"]
+    const searchTriggers = [
+      "presidente", "quién es", "quien es", "noticias", "actualidad",
+      "precio", "cotización", "cotizacion", "bitcoin", "euro",
+      "último", "última", "ultimo", "ultima", "hoy", "ahora",
+      "buscá", "googleá", "busca", "buscar", "internet",
+      "deportes", "fútbol", "futbol", "partido",
+    ]
+    return (
+      bypassPatterns.some((p) => lower.includes(p)) ||
+      searchTriggers.some((p) => lower.includes(p))
+    )
   }
 
   function detectSpotifyAuthIntent(content: string): boolean {
@@ -61,6 +98,20 @@ export const useChatStore = defineStore("chat", () => {
       /reproduce(?:r)?\s+(?:en\s+)?spotify\s+(.+)/i,
       /(?:pon|coloca|busca)\s+(?:en\s+)?spotify\s+(.+)/i,
       /(?:escuchar|oír|oir)\s+(.+)\s+en\s+spotify/i,
+    ]
+    for (const pattern of patterns) {
+      const match = lower.match(pattern)
+      if (match) return match[1].trim()
+    }
+    return null
+  }
+
+  function detectSpotifyQueueIntent(content: string): string | null {
+    const lower = content.toLowerCase()
+    const patterns = [
+      /agreg(?:á|a)\s+(.+?)\s+(?:a\s+la\s+)?(?:fila|cola)/i,
+      /sum(?:á|a)\s+(.+?)\s+(?:a\s+la\s+)?(?:fila|cola)/i,
+      /(?:pon|poné)\s+(.+?)\s+(?:despu[eé]s|en\s+la\s+cola)/i,
     ]
     for (const pattern of patterns) {
       const match = lower.match(pattern)
@@ -90,6 +141,13 @@ export const useChatStore = defineStore("chat", () => {
     return null
   }
 
+  function sanitizeQuery(query: string): string {
+    return query
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "")
+      .trim()
+      .slice(0, 200)
+  }
+
   async function sendMessage(content: string) {
     const hud = useHudStore()
 
@@ -107,6 +165,29 @@ export const useChatStore = defineStore("chat", () => {
       }
       setTyping(false)
       hud.setState("escuchando")
+      return
+    }
+
+    const spotifyQueueQuery = detectSpotifyQueueIntent(content)
+    if (spotifyQueueQuery) {
+      const available = await invoke<boolean>("is_spotify_available")
+      if (!available) {
+        addMessage("⚠️ Spotify no está instalado en este equipo.", "system")
+        return
+      }
+      hud.setState("pensando")
+      setTyping(true, "🎵 Agregando a la cola de Spotify...")
+      try {
+        const result = await invoke<string>("add_to_spotify_queue", { query: spotifyQueueQuery })
+        addMessage(`🎵 Agregado a la cola: ${result}`, "jarvis")
+        setTyping(false)
+        setTimeout(() => hud.setState("escuchando"), 2000)
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        addMessage(`⚠️ Error con Spotify: ${msg}`, "system")
+        setTyping(false)
+        hud.setState("escuchando")
+      }
       return
     }
 
@@ -135,10 +216,15 @@ export const useChatStore = defineStore("chat", () => {
 
     const ytQuery = detectYouTubeIntent(content)
     if (ytQuery) {
+      const sanitizedQuery = sanitizeQuery(ytQuery)
+      if (!sanitizedQuery) {
+        addMessage("⚠️ Consulta de YouTube inválida.", "system")
+        return
+      }
       hud.setState("pensando")
       setTyping(true, "🎬 Buscando en YouTube...")
       try {
-        const videoTitle = await invoke<string>("play_youtube", { query: ytQuery })
+        const videoTitle = await invoke<string>("play_youtube", { query: sanitizedQuery })
         addMessage(`🎬 Abriendo: ${videoTitle} en YouTube`, "jarvis")
         setTyping(false)
         setTimeout(() => hud.setState("escuchando"), 2000)
@@ -156,11 +242,14 @@ export const useChatStore = defineStore("chat", () => {
 
     try {
       await ensureCerebroRunning()
-
-      setTyping(true, "🔍 Buscando en web...")
       webSearchActive.value = true
 
-      const history = messages.value.slice(0, -1).map((m) => ({
+      if (shouldShowWebNotification(content)) {
+        hud.setState("trabajando")
+        setTyping(true, "Sin resultados en Cerebro — buscando en internet...")
+      }
+
+      const history = messages.value.slice(-20, -1).map((m) => ({
         role: m.role === "jarvis" ? "assistant" : m.role === "system" ? "system" : "user",
         content: m.content,
       }))
@@ -172,14 +261,24 @@ export const useChatStore = defineStore("chat", () => {
 
       webSearchActive.value = false
 
-      if (result.web_search_used) {
-        setTyping(true, "📋 Resultados de búsqueda integrados...")
-        await new Promise((r) => setTimeout(r, 500))
+      if (result.source === "web") {
+        setTypingSource("web")
+      } else if (result.source === "llm") {
+        hud.setState("pensando")
+        setTypingSource("llm")
+      } else {
+        setTypingSource("cerebro")
       }
 
       const fallback = "No tengo información sobre eso. ¿Puedes reformular tu pregunta?"
       const displayResponse = result.response?.trim() || fallback
-      addMessage(displayResponse, "jarvis")
+
+      const source: MessageSource | undefined =
+        result.source_url || result.source_domain
+          ? { type: result.source, url: result.source_url ?? undefined, domain: result.source_domain ?? undefined }
+          : undefined
+
+      addMessage(displayResponse, "jarvis", source)
 
       hud.setState("respondiendo")
       setTyping(false)
@@ -209,6 +308,7 @@ export const useChatStore = defineStore("chat", () => {
     addMessage,
     clearMessages,
     setTyping,
+    setTypingSource,
     sendMessage,
   }
 })

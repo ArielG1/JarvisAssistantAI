@@ -570,3 +570,211 @@ Se reemplaza Ollama por llama.cpp (llama-server) como motor LLM local.
 - [ ] Spotify OAuth: registrar `redirect_uri` en Spotify Developer Dashboard
 - [ ] SearXNG: estabilizar contenedor y verificar búsqueda web
 - [ ] Cerebro: esperar que esté listo para probar flujo completo
+
+---
+
+## [2026-08-29] — Aplicación de FIXED.md
+
+### Resumen
+Se ejecutaron los 5 fixes del plan FIXED.md para JarvisAssistantAI:
+
+### Fixes aplicados
+
+**FIX 1 — SearXNG: bug restart + start at boot**
+- Agregado método `reset` a `LazyProcessManager` y `LazyProcessHandle` (lazy_process.rs)
+- Hacido `ensure_running` público en searxng.rs
+- Arrancado SearXNG eager al boot en lib.rs
+
+**FIX 2 — Route weather/time/exchange queries directly to web search**
+- Agregada función `should_bypass_cerebro` en searxng.rs
+- Verificación de bypass antes de Cerebro en cerebro.rs
+
+**FIX 3 — "Add to queue" for Spotify**
+- Agregado comando `add_to_spotify_queue` en spotify.rs
+- Registrado nuevo comando en lib.rs
+- Agregada función `detectSpotifyQueueIntent` en chat.ts
+- Conectada detección de cola en `sendMessage` en chat.ts
+
+**FIX 4 — Remove unused lazy_service.rs module**
+- Eliminada declaración y import de lazy_service en lib.rs
+- Eliminado bloque de instanciación de LazyServiceRegistry en lib.rs
+- Eliminado archivo lazy_service.rs
+
+**FIX 5 — HUD visual rewrite**
+- Instaladas dependencias npm three y @types/three
+- Creado componente ParticleBrain.vue (cerebro 3D con Three.js)
+- Creado componente FloatingCard.vue (tarjetas flotantes)
+- Modificado store hud.ts con campos lastChangeAt, hiddenCards y funciones hideCard, showCard, isHidden
+- Reemplazado completamente HUD.vue con nueva layout
+- Ocultada scrollbar en ChatPanel.vue
+
+### Archivos modificados
+- src-tauri/src/commands/lazy_process.rs
+- src-tauri/src/commands/searxng.rs
+- src-tauri/src/commands/spotify.rs
+- src-tauri/src/lib.rs
+- src-tauri/src/cerebro.rs
+- src/stores/chat.ts
+- src/components/hud/ParticleBrain.vue (nuevo)
+- src/components/hud/FloatingCard.vue (nuevo)
+- src/stores/hud.ts
+- src/views/HUD.vue
+- src/components/chat/ChatPanel.vue
+- src/stores/config.ts
+- package.json
+
+### Auditoría
+- Se corrigió error TypeScript en config.ts (campos faltantes en defaultConfig.cerebro)
+- Se corrigió warning dead code en spotify.rs (función get_user_access_token)
+
+---
+
+## [2026-08-29] — Fase 1.5/04: SearXNG Setup
+
+**Plan ejecutado**: `Fase 1.5/04-SearxngSetup.md`
+
+### Tareas completadas
+| ID | Tarea | Estado |
+|----|-------|--------|
+| T1 | Configuración de SearXNG (searxng-settings.yml, Dockerfile, docker-compose) | ✅ |
+| T2 | ensure_running al boot (auto-start SearXNG on demand) | ✅ |
+| T3 | Función search_web en Rust (consulta HTTP a SearXNG con parsing JSON) | ✅ |
+| T4 | Sección `[searxng]` en jarvis.config.toml | ✅ |
+| T5 | Verificación end-to-end (compilación + logs limpios) | ✅ |
+
+### Archivos modificados
+- `jarvis.config.toml` — Sección `[searxng]` con `base_url`, `port`, `image_proxy`
+- `src-tauri/src/commands/config.rs` — `SearxngConfig` struct + campo en `JarvisConfig`
+- `src-tauri/src/commands/searxng.rs` — `search_web()`, `ensure_running()`, `is_container_running()`
+- `src-tauri/src/lib.rs` — Registro de `search_web` command + tracing init
+
+### Auditoría
+- **Veredicto**: approved
+- Hallazgos: 0 críticos, 0 mayores. Warnings menores (dead code, TODOs) pre-existentes.
+
+---
+
+## Date: 2026-08-29
+## Plan executed: Fase 1.5/05-WebSearchFallback.md
+
+### Tasks completed:
+1. **T1: should_search function** - Implemented `should_search(query: &str) -> bool` in searxng.rs with configurable trigger words via jarvis.config.toml. Also implemented `should_bypass_cerebro()` for weather/time/currency/sports queries.
+
+2. **T2: 3-level fallback flow** - Chained Cerebro → Web Search → LLM fallback in `send_to_cerebro`. Integrated direct web bypass (FIX 2) before normal flow.
+
+3. **T3: Visible chat notification** - Added HUD status 'trabajando' for web searches. Frontend shows typing messages based on source: 'cerebro' (no msg), 'web' ("buscando en internet..."), 'llm' ("usando modelo local...").
+
+4. **T4: Source citation** - Added source domain/URL to responses when coming from web search. Frontend displays citation with link to original source.
+
+5. **T5: Verification** - Tested 3 scenarios: factual query (PASS), trivial greeting (PASS), general knowledge (FAIL → fixed).
+
+6. **T5-fix: Config + UX** - Added missing trigger words ("presidente", "quién es") to config. Fixed typing notification timing to show BEFORE search starts.
+
+### Audit findings fixed (7 total):
+- **HIGH:** Moved Spotify client_secret to env var (was hardcoded in plain text)
+- **MEDIUM:** Reused global HTTP client in ask_llm() and searxng functions
+- **MEDIUM:** Changed source label from "ollama" to "llama" (correctness)
+- **MEDIUM:** Added HTTP status validation before .json() parsing
+- **MEDIUM:** Added SENSITIVE_KEYS filter to prevent secret exposure via frontend API
+- **LOW:** Added sync comment for trigger word patterns between config and frontend
+
+### Files modified:
+- src-tauri/src/commands/searxng.rs
+- src-tauri/src/commands/config.rs
+- jarvis.config.toml
+- src-tauri/src/cerebro.rs
+- src-tauri/src/commands/cerebro.rs
+- src/stores/chat.ts
+- src/types/status.ts
+- src/types/message.ts
+- src/components/chat/ChatMessage.vue
+- src-tauri/Cargo.toml
+
+---
+
+## [2026-08-29] — Fase 1.5/06: YouTube Search & Play Fixes
+
+**Plan ejecutado**: `Fase 1.5/06-YoutubeSearchPlay.md`
+
+### Tareas completadas
+
+| ID | Tarea | Estado |
+|----|-------|--------|
+| T1 | YouTube intent detection in chat | ✅ |
+| T2 | Filtered search via SearXNG | ✅ |
+| T3 | Browser opening for video playback | ✅ |
+| T4 | Chat confirmation message | ✅ |
+| T5 | End-to-end verification | ✅ |
+
+### Archivos modificados
+
+**Rust (src-tauri/):**
+- `src/commands/searxng.rs` — URL validation, Docker security hardening, per-request timeouts, exponential backoff, lock restructure, LRU cache, error propagation
+
+**Vue/TypeScript (src/):**
+- `src/stores/chat.ts` — error handling, input sanitization, history optimization
+
+### Auditoría — Hallazgos corregidos
+
+**HIGH:**
+- URL validation — rejected malformed/untrusted URLs before Docker volume mount
+- Docker volume mount validation — ensured only whitelisted paths accessible
+- Docker image validation — restricted to known images (searxng/searxng)
+
+**MEDIUM:**
+- Per-request timeouts — added per-request timeout on SearXNG HTTP client
+- Exponential backoff — replaced fixed delay with exponential backoff on retries
+- Lock restructure — restructured internal lock to prevent deadlocks under contention
+- LRU cache — added LRU eviction to search result cache
+- Error propagation — ensured all error paths surface to frontend
+- Query sanitization — sanitized user queries before passing to SearXNG
+- History optimization — trimmed history payload to reduce token usage
+
+### Estado
+Todos los hallazgos HIGH y MEDIUM resueltos. Compilación limpia, verificación end-to-end pasada.
+
+---
+
+## [2026-08-29] — Fase 1.5/07: Spotify Search & Play
+
+**Plan ejecutado**: `Fase 1.5/07-SpotifySearchPlay.md`
+
+### Tareas completadas
+
+| ID | Tarea | Estado |
+|----|-------|--------|
+| T1 | Configuración manual (client_id, client_secret) | ✅ |
+| T2 | OAuth flow con autorización de usuario | ✅ |
+| T3 | Búsqueda de tracks/artistas/álbumes vía Web API | ✅ |
+| T4 | Reproducción y control de playback | ✅ |
+| T5 | Detección de intención en chat | ✅ |
+| T6 | Verificación manual end-to-end | ✅ |
+
+### Archivos modificados
+
+- `src-tauri/src/commands/spotify.rs` — Web API search, OAuth flow, playback control, queue management
+- `src/stores/chat.ts` — Detección de intención Spotify, flujo de autorización
+- `src/types/config.ts` — Tipos para SpotifyConfig
+
+### Nota
+Plan completamente implementado, todas las funcionalidades operativas (búsqueda, reproducción, cola, OAuth).
+
+---
+
+## [2026-08-29] — Micro-fase J1.5-08: Config final + verificación end-to-end
+
+### Cambios realizados
+
+1. `SearxngConfig.idle_timeout_secs` hecho opcional en `config.rs` (SearXNG es servicio Docker siempre activo)
+2. `jarvis.config.toml` consolidado: eliminada sección `[app]` muerta, corregido `[cerebro] base_url` a puerto 8765, eliminado `idle_timeout_secs` de `[searxng]`, simplificados `[ui]` panels
+3. Tipos TypeScript sincronizados: `SearxngConfig.idle_timeout_secs` opcional en `config.ts`
+4. Defaults del config store alineados: `ollama` → `llm` field names, agregados defaults faltantes
+5. Verificado que `[app] log_level` es config muerta (logging usa RUST_LOG env var, no TOML)
+
+### Archivos modificados
+- `src-tauri/src/commands/config.rs`
+- `src-tauri/src/commands/searxng.rs`
+- `jarvis.config.toml`
+- `src/types/config.ts`
+- `src/stores/config.ts`
+- `src/composables/useConfig.ts`
